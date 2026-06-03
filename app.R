@@ -1,5 +1,10 @@
 library(shiny)
 library(MASS)
+library(ggplot2)
+library(patchwork)
+library(ggcorrplot)
+library(e1071)
+library(randomForest)
 
 options(shiny.maxRequestSize = 30 * 1024^2)
 

@@ -97,4 +97,51 @@ server <- function(input, output, session) {
     cat("\nStruktura danych:\n")
     str(data)
   })
+
+    # aktualizacja list wyboru po zmianie inputów modeli
+    update_regression_inputs(session, input, get_dataset_by_name,
+                           "linear_dataset", "linear_y", "linear_x")
+    update_regression_inputs(session, input, get_dataset_by_name,
+                           "rf_reg_dataset", "rf_reg_y", "rf_reg_x")
+    update_regression_inputs(session, input, get_dataset_by_name,
+                           "svr_dataset",    "svr_y",    "svr_x")
+
+    # renderowanie wyników 
+    show_regression_config(session, input, output, get_dataset_by_name,
+                         "linear_dataset", "linear_y", "linear_x",
+                         "show_linear_config", "linear_summary")
+    show_regression_config(session, input, output, get_dataset_by_name,
+                         "rf_reg_dataset", "rf_reg_y", "rf_reg_x",
+                         "show_rf_reg_config", "rf_reg_summary")
+    show_regression_config(session, input, output, get_dataset_by_name,
+                         "svr_dataset", "svr_y", "svr_x",
+                         "show_svr_config", "svr_summary")
+
+
+    # predykcje na regresji
+    setup_regression_prediction(session, input, output, get_dataset_by_name,
+                              prefix = "linear",
+                              dataset_input = "linear_dataset",
+                              y_input = "linear_y",
+                              x_input = "linear_x",
+                              button_input = "show_linear_config",
+                              predict_fn = predict_linear)
+
+  setup_regression_prediction(session, input, output, get_dataset_by_name,
+                              prefix = "rf_reg",
+                              dataset_input = "rf_reg_dataset",
+                              y_input = "rf_reg_y",
+                              x_input = "rf_reg_x",
+                              button_input = "show_rf_reg_config",
+                              predict_fn = predict_rf_reg)
+
+  setup_regression_prediction(session, input, output, get_dataset_by_name,
+                              prefix = "svr",
+                              dataset_input = "svr_dataset",
+                              y_input = "svr_y",
+                              x_input = "svr_x",
+                              button_input = "show_svr_config",
+                              predict_fn = predict_svr_reg)
+    
+
 }
