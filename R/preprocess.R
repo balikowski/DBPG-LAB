@@ -1,3 +1,7 @@
+# Podstawowe czyszczenie ramki danych przed dopasowaniem modelu.
+# Usuwa puste wiersze/kolumny, ujednolica nazwy, uzupełnia braki medianą (num.)
+# lub etykietą "Brak" (char.), zamienia kolumny tekstowe na liczbowe jeśli
+# >80% wartości da się sparsować jako liczba.
 preprocess_data <- function(data) {
   data <- as.data.frame(data)
   data[data == ""] <- NA
@@ -8,6 +12,7 @@ preprocess_data <- function(data) {
   names(data) <- make.names(names(data), unique = TRUE)
   data <- unique(data)
 
+  # próba konwersji kolumn tekstowych na numeryczne
   data <- data.frame(
     lapply(data, function(col) {
       if (is.character(col)) {
@@ -20,12 +25,11 @@ preprocess_data <- function(data) {
     check.names = FALSE
   )
 
+  # uzupełnianie braków
   data <- data.frame(
     lapply(data, function(col) {
       if (is.numeric(col)) {
-        if (!all(is.na(col))) {
-          col[is.na(col)] <- median(col, na.rm = TRUE)
-        }
+        if (!all(is.na(col))) col[is.na(col)] <- median(col, na.rm = TRUE)
       } else {
         col[is.na(col)] <- "Brak"
       }

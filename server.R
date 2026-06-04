@@ -4,24 +4,83 @@ source("R/server_helpers.R")
 
 server <- function(input, output, session) {
 
-    # dane użytkownika
-    uploaded <- reactiveValues(
-        data = NULL,
-        name = NULL
-    )
+  # ── Reaktywne dane użytkownika ───────────────────────────────────────────
+  uploaded <- reactiveValues(
+    data = NULL,
+    name = NULL
+  )
 
-    get_dataset_by_name <- function(dataset_name) {
-        if (is.null(dataset_name)) return(NULL)
-        if (dataset_name == "iris")   return(preprocess_data(iris))
-        if (dataset_name == "Boston") return(preprocess_data(MASS::Boston))
-        if (dataset_name == "mtcars") return(preprocess_data(mtcars))
-        if (grepl("^Wgrany:", dataset_name) && !is.null(uploaded$data)) {
-            return(uploaded$data)
-        }
-        return(NULL)
+  get_dataset_by_name <- function(dataset_name) {
+    if (is.null(dataset_name)) return(NULL)
+    if (dataset_name == "iris")   return(preprocess_data(iris))
+    if (dataset_name == "Boston") return(preprocess_data(MASS::Boston))
+    if (dataset_name == "mtcars") return(preprocess_data(mtcars))
+    if (grepl("^Wgrany:", dataset_name) && !is.null(uploaded$data)) {
+      return(uploaded$data)
+    }
+    return(NULL)
   }
 
-  # import pliku CSV
+  # ── Aktualizacje list wyboru po zmianie datasetu / zmiennej Y ───────────
+  update_regression_inputs(session, input, get_dataset_by_name,
+                           "linear_dataset", "linear_y", "linear_x")
+  update_regression_inputs(session, input, get_dataset_by_name,
+                           "rf_reg_dataset", "rf_reg_y", "rf_reg_x")
+  update_regression_inputs(session, input, get_dataset_by_name,
+                           "svr_dataset",    "svr_y",    "svr_x")
+
+  update_classification_inputs(session, input, get_dataset_by_name,
+                               "logistic_dataset", "logistic_target", "logistic_x")
+  update_classification_inputs(session, input, get_dataset_by_name,
+                               "svm_dataset",      "svm_target",      "svm_x")
+  update_classification_inputs(session, input, get_dataset_by_name,
+                               "rf_class_dataset", "rf_class_target", "rf_class_x")
+
+  update_clustering_inputs(session, input, get_dataset_by_name,
+                           "kmeans_dataset",    "kmeans_columns")
+  update_clustering_inputs(session, input, get_dataset_by_name,
+                           "dbscan_dataset",    "dbscan_columns")
+  update_clustering_inputs(session, input, get_dataset_by_name,
+                           "meanshift_dataset", "meanshift_columns")
+
+  # ── Renderowanie wyników po kliknięciu przycisku ─────────────────────────
+  show_regression_config(session, input, output, get_dataset_by_name,
+                         "linear_dataset", "linear_y", "linear_x",
+                         "show_linear_config", "linear_summary")
+  show_regression_config(session, input, output, get_dataset_by_name,
+                         "rf_reg_dataset", "rf_reg_y", "rf_reg_x",
+                         "show_rf_reg_config", "rf_reg_summary")
+  show_regression_config(session, input, output, get_dataset_by_name,
+                         "svr_dataset", "svr_y", "svr_x",
+                         "show_svr_config", "svr_summary")
+
+  show_classification_config(session, input, output, get_dataset_by_name,
+                             "logistic_dataset", "logistic_target", "logistic_x",
+                             "show_logistic_config", "logistic_summary")
+  show_classification_config(session, input, output, get_dataset_by_name,
+                             "svm_dataset", "svm_target", "svm_x",
+                             "show_svm_config", "svm_summary")
+  show_classification_config(session, input, output, get_dataset_by_name,
+                             "rf_class_dataset", "rf_class_target", "rf_class_x",
+                             "show_rf_class_config", "rf_class_summary")
+
+  show_clustering_config(session, input, output, get_dataset_by_name,
+                         "kmeans_dataset", "kmeans_columns",
+                         "show_kmeans_config", "kmeans_summary",
+                         "K-means",
+                         c("Liczba klastrów" = "kmeans_clusters"))
+  show_clustering_config(session, input, output, get_dataset_by_name,
+                         "dbscan_dataset", "dbscan_columns",
+                         "show_dbscan_config", "dbscan_summary",
+                         "DBSCAN",
+                         c("Liczba klastrów" = "dbscan_clusters"))
+  show_clustering_config(session, input, output, get_dataset_by_name,
+                         "meanshift_dataset", "meanshift_columns",
+                         "show_meanshift_config", "meanshift_summary",
+                         "Mean-shift",
+                         c("Liczba klastrów" = "meanshift_clusters"))
+
+  # ── Import pliku CSV ─────────────────────────────────────────────────────
   observeEvent(input$load_file, {
     req(input$file)
 
@@ -67,59 +126,8 @@ server <- function(input, output, session) {
     })
   })
 
-  # status importu
-  output$upload_status <- renderText({
-    if (is.null(uploaded$data)) {
-      return("Nie wczytano pliku. Dostępne dane: iris, Boston, mtcars.")
-    }
-    paste("Zaimportowano:", uploaded$name)
-  })
-
-  # podglad danych
-  selected_data <- reactive({
-    req(input$selected_dataset)
-    get_dataset_by_name(input$selected_dataset)
-  })
-
-  output$data_preview <- renderTable({
-    data <- selected_data()
-    req(data)
-    head(data, 10)
-  })
-
-  output$data_info <- renderPrint({
-    data <- selected_data()
-    req(data)
-    cat("Liczba wierszy:", nrow(data), "\n")
-    cat("Liczba kolumn:",  ncol(data), "\n\n")
-    cat("Nazwy kolumn:\n")
-    print(names(data))
-    cat("\nStruktura danych:\n")
-    str(data)
-  })
-
-    # aktualizacja list wyboru po zmianie inputów modeli
-    update_regression_inputs(session, input, get_dataset_by_name,
-                           "linear_dataset", "linear_y", "linear_x")
-    update_regression_inputs(session, input, get_dataset_by_name,
-                           "rf_reg_dataset", "rf_reg_y", "rf_reg_x")
-    update_regression_inputs(session, input, get_dataset_by_name,
-                           "svr_dataset",    "svr_y",    "svr_x")
-
-    # renderowanie wyników 
-    show_regression_config(session, input, output, get_dataset_by_name,
-                         "linear_dataset", "linear_y", "linear_x",
-                         "show_linear_config", "linear_summary")
-    show_regression_config(session, input, output, get_dataset_by_name,
-                         "rf_reg_dataset", "rf_reg_y", "rf_reg_x",
-                         "show_rf_reg_config", "rf_reg_summary")
-    show_regression_config(session, input, output, get_dataset_by_name,
-                         "svr_dataset", "svr_y", "svr_x",
-                         "show_svr_config", "svr_summary")
-
-
-    # predykcje na regresji
-    setup_regression_prediction(session, input, output, get_dataset_by_name,
+  # ── Predykcja dla modeli regresji ────────────────────────────────────────
+  setup_regression_prediction(session, input, output, get_dataset_by_name,
                               prefix = "linear",
                               dataset_input = "linear_dataset",
                               y_input = "linear_y",
@@ -142,6 +150,60 @@ server <- function(input, output, session) {
                               x_input = "svr_x",
                               button_input = "show_svr_config",
                               predict_fn = predict_svr_reg)
-    
 
+  # ── Predykcja dla modeli klasyfikacji ────────────────────────────────────
+  setup_classification_prediction(session, input, output, get_dataset_by_name,
+                                  prefix = "logistic",
+                                  dataset_input = "logistic_dataset",
+                                  target_input  = "logistic_target",
+                                  x_input       = "logistic_x",
+                                  button_input  = "show_logistic_config",
+                                  predict_fn    = predict_logistic)
+
+  setup_classification_prediction(session, input, output, get_dataset_by_name,
+                                  prefix = "svm",
+                                  dataset_input = "svm_dataset",
+                                  target_input  = "svm_target",
+                                  x_input       = "svm_x",
+                                  button_input  = "show_svm_config",
+                                  predict_fn    = predict_svm_class)
+
+  setup_classification_prediction(session, input, output, get_dataset_by_name,
+                                  prefix = "rf_class",
+                                  dataset_input = "rf_class_dataset",
+                                  target_input  = "rf_class_target",
+                                  x_input       = "rf_class_x",
+                                  button_input  = "show_rf_class_config",
+                                  predict_fn    = predict_rf_class)
+
+  # ── Status importu ───────────────────────────────────────────────────────
+  output$upload_status <- renderText({
+    if (is.null(uploaded$data)) {
+      return("Nie wczytano pliku. Dostępne dane: iris, Boston, mtcars.")
+    }
+    paste("Zaimportowano:", uploaded$name)
+  })
+
+  # ── Podgląd danych ───────────────────────────────────────────────────────
+  selected_data <- reactive({
+    req(input$selected_dataset)
+    get_dataset_by_name(input$selected_dataset)
+  })
+
+  output$data_preview <- renderTable({
+    data <- selected_data()
+    req(data)
+    head(data, 10)
+  })
+
+  output$data_info <- renderPrint({
+    data <- selected_data()
+    req(data)
+    cat("Liczba wierszy:", nrow(data), "\n")
+    cat("Liczba kolumn:",  ncol(data), "\n\n")
+    cat("Nazwy kolumn:\n")
+    print(names(data))
+    cat("\nStruktura danych:\n")
+    str(data)
+  })
 }
