@@ -7,10 +7,10 @@
 # (nchar, nwords, ndigits, nupper, nspecial). Nieznane poziomy -> 0.
 # Zwraca: $train, $test, $new_obs (opcjonalnie), $x_cols, $encodings, $text_cols
 safe_encode_x <- function(train, test = NULL, new_obs = NULL,
-                           x_cols, max_cat = 20) {
+                           x_cols, max_cat = 20, encoding_method = "label") {
 
-  encodings <- list()   # słowniki label-encoding per kolumna
-  text_cols <- c()      # nazwy kolumn zamienionych na cechy tekstowe
+  encodings <- list()
+  text_cols <- c()
 
   text_features <- function(df, col) {
     v <- as.character(df[[col]])
@@ -27,49 +27,69 @@ safe_encode_x <- function(train, test = NULL, new_obs = NULL,
     result
   }
 
+  onehot_expand <- function(df_list, col, lvls) {
+    # zwraca listę zmodyfikowanych ramek (train, test, new_obs)
+    out <- df_list
+    for (nm in names(df_list)) {
+      df <- df_list[[nm]]
+      if (is.null(df)) { out[[nm]] <- NULL; next }
+      v <- as.character(df[[col]])
+      dummies <- as.data.frame(
+        lapply(lvls, function(lv) as.integer(v == lv)),
+        stringsAsFactors = FALSE
+      )
+      names(dummies) <- paste0(col, "__", lvls)
+      out[[nm]] <- cbind(df[, setdiff(names(df), col), drop = FALSE], dummies)
+    }
+    out
+  }
+
   for (col in x_cols) {
     col_data <- train[[col]]
-
-    if (is.numeric(col_data)) next   # numeryczne – nic nie rób
+    if (is.numeric(col_data)) next
 
     uniq <- unique(na.omit(as.character(col_data)))
 
     if (length(uniq) <= max_cat) {
-      # --- label encoding ---
       lvls <- sort(uniq)
       encodings[[col]] <- lvls
 
-      encode_col <- function(v, lvls) {
-        v <- as.character(v)
-        # nieznane poziomy → 0
-        ifelse(v %in% lvls, match(v, lvls), 0L)
+      if (encoding_method == "onehot") {
+        res   <- onehot_expand(list(train = train, test = test, new_obs = new_obs), col, lvls)
+        train <- res$train; test <- res$test; new_obs <- res$new_obs
+      } else {
+        # label encoding
+        encode_col <- function(v, lvls) {
+          v <- as.character(v)
+          ifelse(v %in% lvls, match(v, lvls), 0L)
+        }
+        train[[col]] <- encode_col(train[[col]], lvls)
+        if (!is.null(test))    test[[col]]    <- encode_col(test[[col]],    lvls)
+        if (!is.null(new_obs)) new_obs[[col]] <- encode_col(new_obs[[col]], lvls)
       }
 
-      train[[col]]  <- encode_col(train[[col]], lvls)
-      if (!is.null(test))    test[[col]]    <- encode_col(test[[col]],    lvls)
-      if (!is.null(new_obs)) new_obs[[col]] <- encode_col(new_obs[[col]], lvls)
-
     } else {
-      # --- zamiana na cechy tekstowe ---
       text_cols <- c(text_cols, col)
-
-      train   <- cbind(train[, setdiff(names(train), col), drop = FALSE],
-                       text_features(train, col))
+      train <- cbind(train[, setdiff(names(train), col), drop = FALSE], text_features(train, col))
       if (!is.null(test))
-        test  <- cbind(test[,  setdiff(names(test),  col), drop = FALSE],
-                       text_features(test,  col))
+        test  <- cbind(test[,  setdiff(names(test),  col), drop = FALSE], text_features(test,  col))
       if (!is.null(new_obs))
-        new_obs <- cbind(new_obs[, setdiff(names(new_obs), col), drop = FALSE],
-                         text_features(new_obs, col))
+        new_obs <- cbind(new_obs[, setdiff(names(new_obs), col), drop = FALSE], text_features(new_obs, col))
     }
   }
 
-  # zaktualizuj x_cols – usuń tekstowe, dodaj ich cechy
+  # zaktualizuj x_cols
   new_x_cols <- x_cols
   for (col in text_cols) {
     new_x_cols <- setdiff(new_x_cols, col)
     new_x_cols <- c(new_x_cols,
                     paste0(col, c("__nchar","__nwords","__ndigits","__nupper","__nspecial")))
+  }
+  if (encoding_method == "onehot") {
+    for (col in names(encodings)) {
+      new_x_cols <- setdiff(new_x_cols, col)
+      new_x_cols <- c(new_x_cols, paste0(col, "__", encodings[[col]]))
+    }
   }
 
   list(
@@ -183,7 +203,7 @@ run_model_for_spec <- function(spec) {
     show_rf_class_config = implement_rf_classification(spec),
     show_kmeans_config   = implement_kmeans_clustering(spec),
     show_dbscan_config   = implement_dbscan_clustering(spec),
-    show_meanshift_config = implement_meanshift_clustering(spec),
+    show_meanshift_config = implement_hclust_clustering(spec),
     cat("Brak implementacji dla:", spec$method_id, "\n")
   )
 }
@@ -204,7 +224,7 @@ plot_model_for_spec <- function(spec) {
     show_rf_class_config = plot_rf_classification(spec),
     show_kmeans_config   = plot_kmeans_clustering(spec),
     show_dbscan_config   = plot_dbscan_clustering(spec),
-    show_meanshift_config = plot_meanshift_clustering(spec),
+    show_meanshift_config = plot_hclust_clustering(spec),
     {
       plot.new()
       text(0.5, 0.5, paste("Brak wykresu dla:", spec$method_id))
@@ -216,56 +236,51 @@ plot_model_for_spec <- function(spec) {
 
 # --- Regresja liniowa ---
 implement_linear_regression <- function(spec) {
+  train_pct <- if (!is.null(spec$train_percent)) spec$train_percent / 100 else 0.8
+
+  set.seed(123)
+  n     <- nrow(spec$data)
+  idx   <- sample(seq_len(n), size = floor(train_pct * n))
+  train <- spec$data[idx,  , drop = FALSE]
+  test  <- spec$data[-idx, , drop = FALSE]
+
   formula <- as.formula(
     paste(spec$y_column, "~", paste(spec$x_columns, collapse = " + "))
   )
 
-  model <- lm(formula, data = spec$data)
-  r2 <- summary(model)$r.squared
-  r2adj <- summary(model)$adj.r.squared
+  model <- lm(formula, data = train)
 
-  y_true <- spec$data[[spec$y_column]]
-  y_pred <- predict(model)
-  mse <- mean(residuals(model)^2)
+  y_true <- test[[spec$y_column]]
+  y_pred <- predict(model, newdata = test)
 
-  cat("====== OCENA MODELU ====== \n")
-  cat("R2 = ")
-  cat(round(r2,3))
-  cat("\nAdjusted R2 = ")
-  cat(round(r2adj,3))
-  cat("\nMSE = ")
-  cat(round(mse,3))
-  cat("\nRMSE = ")
-  cat(sqrt(round(mse,3)))
-  cat("\n\n")
-  cat("====== RÓWNANIE MODELU ====== \n")
+  n_test <- length(y_true)
+  p      <- length(spec$x_columns)
+  mse    <- mean((y_true - y_pred)^2)
+  rmse   <- sqrt(mse)
+  r2     <- 1 - sum((y_true - y_pred)^2) / sum((y_true - mean(y_true))^2)
+  r2adj  <- 1 - ((1 - r2) * (n_test - 1) / (n_test - p - 1))
+
+  cat("====== OCENA MODELU ======\n")
+  cat("Podział:", floor(train_pct * 100), "% trening /",
+      round((1 - train_pct) * 100), "% test\n\n")
+  cat("R²            =", round(r2, 3), "\n")
+  cat("Adjusted R²   =", round(r2adj, 3), "\n")
+  cat("MSE           =", round(mse, 3), "\n")
+  cat("RMSE          =", round(rmse, 3), "\n\n")
+
+  cat("====== RÓWNANIE MODELU (trening) ======\n")
   coefs <- coef(model)
-
-formula_text <- paste0(
-  "Y = ",
-  round(coefs[1],2)
-)
-
-for(i in 2:length(coefs)){
-
-  value <- round(coefs[i],3)
-  variable <- names(coefs[i])
-
-  sign <- ifelse(value >= 0, " + ", " - ")
-
-  formula_text <- paste0(
-    formula_text,
-    "\n",
-    sign,
-    abs(value),
-    " * ",
-    variable
-  )
-}
+  formula_text <- paste0("Y = ", round(coefs[1], 2))
+  for (i in 2:length(coefs)) {
+    value    <- round(coefs[i], 3)
+    variable <- names(coefs[i])
+    sign     <- ifelse(value >= 0, " + ", " - ")
+    formula_text <- paste0(formula_text, "\n", sign, abs(value), " * ", variable)
+  }
   cat(formula_text)
 
-
-  return(invisible(model))
+  return(invisible(list(model = model, train = train, test = test,
+                        y_true = y_true, y_pred = y_pred)))
 }
 
 
@@ -278,18 +293,18 @@ plot_linear_regression <- function(spec) {
     return(NULL)
   }
 
-  model <- implement_linear_regression(spec)
+  res   <- implement_linear_regression(spec)
+  model <- res$model
 
-  # Dane: observed vs predicted
+  # wykresy na zbiorze testowym
   preds <- data.frame(
-    Observed  = spec$data[[spec$y_column]],
-    Predicted = predict(model)
+    Observed  = res$y_true,
+    Predicted = res$y_pred
   )
 
-  # Dane: reszty
   residual_data <- data.frame(
-    predicted = predict(model),
-    residuals = residuals(model)
+    predicted = res$y_pred,
+    residuals = res$y_true - res$y_pred
   )
 
   base_theme <- theme_minimal(base_size = 13) +
@@ -431,46 +446,47 @@ plot_linear_regression <- function(spec) {
 
 implement_rf_regression <- function(spec) {
   library(randomForest)
-  library(ggplot2)
   set.seed(123)
+
+  train_pct <- if (!is.null(spec$train_percent)) spec$train_percent / 100 else 0.8
+
+  n     <- nrow(spec$data)
+  idx   <- sample(seq_len(n), size = floor(train_pct * n))
+  train <- spec$data[idx,  , drop = FALSE]
+  test  <- spec$data[-idx, , drop = FALSE]
 
   formula <- as.formula(
     paste(spec$y_column, "~", paste(spec$x_columns, collapse = " + "))
   )
 
-  model_rf <- randomForest(formula, data = spec$data)
+  model_rf <- randomForest(formula, data = train)
 
-  # wartości rzeczywiste i predykcje
-  y_true <- spec$data[[spec$y_column]]
+  y_true <- test[[spec$y_column]]
+  y_pred <- predict(model_rf, newdata = test)
 
-  y_pred <- predict(model_rf, spec$data)
-
-  n <- length(y_true)
-
-  p <- length(spec$x_columns)
-
-  r2 <- 1 - sum((y_true - y_pred)^2) /
-              sum((y_true - mean(y_true))^2)
-
-  adj_r2 <- 1 - ((1-r2)*(n-1)/(n-p-1))
-
-  mse <- mean((y_true - y_pred)^2)
-
-  rmse <- sqrt(mse)
+  n_test <- length(y_true)
+  p      <- length(spec$x_columns)
+  r2     <- 1 - sum((y_true - y_pred)^2) / sum((y_true - mean(y_true))^2)
+  adj_r2 <- 1 - ((1 - r2) * (n_test - 1) / (n_test - p - 1))
+  mse    <- mean((y_true - y_pred)^2)
+  rmse   <- sqrt(mse)
 
   cat("====== OCENA MODELU ======\n")
-  cat("R² =", round(r2,3), "\n")
-  cat("Adjusted R² =", round(adj_r2,3), "\n")
-  cat("MSE =", round(mse,3), "\n")
-  cat("RMSE =", round(rmse,3), "\n")
+  cat("Podział:", floor(train_pct * 100), "% trening /",
+      round((1 - train_pct) * 100), "% test\n\n")
+  cat("R²            =", round(r2, 3), "\n")
+  cat("Adjusted R²   =", round(adj_r2, 3), "\n")
+  cat("MSE           =", round(mse, 3), "\n")
+  cat("RMSE          =", round(rmse, 3), "\n")
 
   cat("\n====== WAŻNOŚĆ ZMIENNYCH ======\n")
   imp <- importance(model_rf)
+  for (i in rownames(imp)) {
+    cat(i, ":", round(imp[i, 1], 3), "\n")
+  }
 
-for(i in rownames(imp)){
-    cat(i, ":", round(imp[i,1],3), "\n")
-}
-  return(invisible(model_rf))
+  return(invisible(list(model = model_rf, train = train, test = test,
+                        y_true = y_true, y_pred = y_pred)))
 }
 
 plot_rf_regression <- function(spec) {
@@ -483,10 +499,10 @@ plot_rf_regression <- function(spec) {
     return(NULL)
   }
 
-  model <- implement_rf_regression(spec)
-
-  observed  <- spec$data[[spec$y_column]]
-  predicted <- predict(model, newdata = spec$data)
+  res       <- implement_rf_regression(spec)
+  model     <- res$model
+  observed  <- res$y_true
+  predicted <- res$y_pred
 
   # Dane: observed vs predicted
   preds <- data.frame(
@@ -620,100 +636,74 @@ plot_rf_regression <- function(spec) {
 
 implement_svr_regression <- function(spec) {
   library(e1071)
-
   set.seed(123)
 
-  if (is.null(spec$x_columns) || length(spec$x_columns) == 0) {
-    return(NULL)
-  }
+  if (is.null(spec$x_columns) || length(spec$x_columns) == 0) return(NULL)
 
-  data <- spec$data
+  train_pct  <- if (!is.null(spec$train_percent)) spec$train_percent / 100 else 0.8
+  data       <- spec$data
   model_cols <- c(spec$y_column, spec$x_columns)
 
-  data_model <- data[, model_cols, drop = FALSE]
+  n     <- nrow(data)
+  idx   <- sample(seq_len(n), size = floor(train_pct * n))
+  train <- data[idx,  model_cols, drop = FALSE]
+  test  <- data[-idx, model_cols, drop = FALSE]
 
   # kolumny numeryczne i parametry skalowania
-  num_cols <- names(data_model)[sapply(data_model, is.numeric)]
+  num_cols <- names(train)[sapply(train, is.numeric)]
 
   scale_params <- list(
-    mean = sapply(data_model[, num_cols, drop = FALSE],
-                  mean, na.rm = TRUE),
-    sd   = sapply(data_model[, num_cols, drop = FALSE],
-                  sd,   na.rm = TRUE)
+    mean = sapply(train[, num_cols, drop = FALSE], mean, na.rm = TRUE),
+    sd   = sapply(train[, num_cols, drop = FALSE], sd,   na.rm = TRUE)
   )
-
   scale_params$sd[scale_params$sd == 0] <- 1
 
-  data_scaled <- data_model
-
-  data_scaled[, num_cols] <- scale(
-    data_model[, num_cols, drop = FALSE],
-    center = scale_params$mean,
-    scale  = scale_params$sd
-  )
+  train_scaled      <- train
+  test_scaled       <- test
+  train_scaled[, num_cols] <- scale(train[, num_cols, drop = FALSE],
+                                    center = scale_params$mean, scale = scale_params$sd)
+  test_scaled[, num_cols]  <- scale(test[,  num_cols, drop = FALSE],
+                                    center = scale_params$mean, scale = scale_params$sd)
 
   formula <- as.formula(
-    paste(
-      spec$y_column,
-      "~",
-      paste(spec$x_columns, collapse = " + ")
-    )
+    paste(spec$y_column, "~", paste(spec$x_columns, collapse = " + "))
   )
 
   x_num_cols <- intersect(spec$x_columns, num_cols)
-
-  if(length(x_num_cols) > 0){
-    gamma_val <- 1 / (
-      length(spec$x_columns) *
-      mean(
-        sapply(
-          data_scaled[, x_num_cols, drop = FALSE],
-          var
-        )
-      )
-    )
+  gamma_val  <- if (length(x_num_cols) > 0) {
+    1 / (length(spec$x_columns) * mean(sapply(train_scaled[, x_num_cols, drop = FALSE], var)))
   } else {
-    gamma_val <- 1 / length(spec$x_columns)
+    1 / length(spec$x_columns)
   }
 
-  model_svr <- svm(
-    formula,
-    data    = data_scaled,
-    type    = "eps-regression",
-    kernel  = "radial",
-    cost    = 1,
-    epsilon = 0.1,
-    gamma   = gamma_val
-  )
+  model_svr <- svm(formula, data = train_scaled,
+                   type = "eps-regression", kernel = "radial",
+                   cost = 1, epsilon = 0.1, gamma = gamma_val,
+                   scale = FALSE)   # dane już skalowane ręcznie
 
-  y_true <- spec$data[[spec$y_column]]
+  pred_scaled <- predict(model_svr, newdata = test_scaled)
+  y_pred <- pred_scaled * scale_params$sd[spec$y_column] +
+            scale_params$mean[spec$y_column]
+  y_true <- test[[spec$y_column]]
 
-  pred_scaled <- predict(
-    model_svr,
-    newdata = data_scaled
-  )
-
-  y_pred <- pred_scaled *
-    scale_params$sd[spec$y_column] +
-    scale_params$mean[spec$y_column]
-
-  n <- length(y_true)
-  p <- length(spec$x_columns)
-
+  n_test <- length(y_true)
+  p      <- length(spec$x_columns)
   mse    <- mean((y_true - y_pred)^2)
   rmse   <- sqrt(mse)
   mae    <- mean(abs(y_true - y_pred))
   r2     <- 1 - sum((y_true - y_pred)^2) / sum((y_true - mean(y_true))^2)
-  adj_r2 <- 1 - ((1 - r2) * (n - 1) / (n - p - 1))
+  adj_r2 <- 1 - ((1 - r2) * (n_test - 1) / (n_test - p - 1))
 
   cat("====== OCENA MODELU ======\n")
-  cat("R² =", round(r2, 3), "\n")
-  cat("Adjusted R² =", round(adj_r2, 3), "\n")
-  cat("MSE =", round(mse, 3), "\n")
-  cat("RMSE =", round(rmse, 3), "\n")
-  cat("MAE =", round(mae, 3), "\n")
+  cat("Podział:", floor(train_pct * 100), "% trening /",
+      round((1 - train_pct) * 100), "% test\n\n")
+  cat("R²            =", round(r2, 3), "\n")
+  cat("Adjusted R²   =", round(adj_r2, 3), "\n")
+  cat("MSE           =", round(mse, 3), "\n")
+  cat("RMSE          =", round(rmse, 3), "\n")
+  cat("MAE           =", round(mae, 3), "\n")
 
-  cat("====== PARAMETRY MODELU ======\n")
+  cat("\n====== PARAMETRY MODELU ======\n")
   cat("Kernel:", model_svr$kernel, "\n")
   cat("Cost:", model_svr$cost, "\n")
   cat("Gamma:", round(model_svr$gamma, 4), "\n")
@@ -721,7 +711,11 @@ implement_svr_regression <- function(spec) {
   cat("\n====== SUPPORT VECTORS ======\n")
   cat("Liczba support vectors:", model_svr$tot.nSV, "\n")
 
-  return(invisible(model_svr))
+  return(invisible(list(model = model_svr,
+                        train_scaled = train_scaled, test_scaled = test_scaled,
+                        y_true = y_true, y_pred = y_pred,
+                        scale_params = scale_params, num_cols = num_cols,
+                        eps = model_svr$epsilon)))
 }
 
 plot_svr_regression <- function(spec) {
@@ -734,45 +728,16 @@ plot_svr_regression <- function(spec) {
     return(NULL)
   }
 
-  model <- implement_svr_regression(spec)
+  res   <- implement_svr_regression(spec)
+  model <- res$model
 
-  # skalowanie identyczne jak w implement_svr_regression
-  model_cols <- c(spec$y_column, spec$x_columns)
-  data_model <- spec$data[, model_cols, drop = FALSE]
-
-  observed <- data_model[[spec$y_column]]
-
-  num_cols <- names(data_model)[sapply(data_model, is.numeric)]
-
-  scale_mean <- sapply(data_model[, num_cols, drop = FALSE], mean, na.rm = TRUE)
-  scale_sd   <- sapply(data_model[, num_cols, drop = FALSE], sd,   na.rm = TRUE)
-  scale_sd[scale_sd == 0] <- 1
-
-  data_scaled <- data_model
-  data_scaled[, num_cols] <- scale(
-    data_model[, num_cols, drop = FALSE],
-    center = scale_mean,
-    scale  = scale_sd
-  )
-
-  pred_scaled <- predict(model, newdata = data_scaled)
-  predicted   <- as.numeric(
-    pred_scaled * scale_sd[spec$y_column] + scale_mean[spec$y_column]
-  )
-
+  observed        <- res$y_true
+  predicted       <- res$y_pred
   residual_values <- observed - predicted
-  eps             <- model$epsilon *
-                       scale_sd[spec$y_column]   # epsilon odskalowane do orig. skali
+  eps             <- model$epsilon * res$scale_params$sd[spec$y_column]
 
-  preds <- data.frame(
-    Observed  = observed,
-    Predicted = predicted
-  )
-
-  residual_data <- data.frame(
-    predicted = predicted,
-    residuals = residual_values
-  )
+  preds <- data.frame(Observed = observed, Predicted = predicted)
+  residual_data <- data.frame(predicted = predicted, residuals = residual_values)
 
   base_theme <- theme_minimal(base_size = 13) +
     theme(
@@ -814,8 +779,8 @@ plot_svr_regression <- function(spec) {
     ) +
     base_theme
 
-  # macierz korelacji
-  dane_kor         <- data_model
+  # macierz korelacji – używamy danych treningowych (przed skalowaniem)
+  dane_kor         <- spec$data[, c(spec$y_column, spec$x_columns), drop = FALSE]
   numeric_cols     <- sapply(dane_kor, is.numeric)
   dane_kor_numeric <- dane_kor[, numeric_cols, drop = FALSE]
 
@@ -848,13 +813,13 @@ plot_svr_regression <- function(spec) {
 
   # epsilon-tube z zaznaczonymi support vectors
   idx <- seq_along(observed)
-  sv_idx <- model$index   # indeksy support vectors w danych skalowanych
+  idx <- seq_along(observed)
 
   tube_df <- data.frame(
     idx       = idx,
     observed  = observed,
     predicted = predicted,
-    is_sv     = idx %in% sv_idx
+    is_sv     = abs(residual_values) >= eps  # punkty poza epsilon-tube ~ support vectors
   )
 
   p5 <- ggplot(tube_df, aes(x = idx)) +
@@ -950,13 +915,14 @@ implement_logistic_classification <- function(spec) {
   set.seed(123)
 
   # podział trening / test
-  n       <- nrow(data)
-  idx     <- sample(seq_len(n), size = floor(train_pct * n))
-  train   <- data[idx,  , drop = FALSE]
-  test    <- data[-idx, , drop = FALSE]
+  n         <- nrow(data)
+  idx       <- sample(seq_len(n), size = floor(train_pct * n))
+  train_raw <- data[idx,  , drop = FALSE]   # przed encodingiem – dla predykcji
+  train     <- train_raw
+  test      <- data[-idx, , drop = FALSE]
 
   # enkodowanie kolumn kategorycznych
-  enc    <- safe_encode_x(train, test, x_cols = x_cols)
+  enc    <- safe_encode_x(train, test, x_cols = x_cols, encoding_method = encoding)
   train  <- enc$train
   test   <- enc$test
   x_cols <- enc$x_cols
@@ -968,16 +934,20 @@ implement_logistic_classification <- function(spec) {
   # skalowanie zmiennych numerycznych
   num_x <- intersect(x_cols, names(train)[sapply(train, is.numeric)])
 
+  scale_means <- NULL; scale_sds <- NULL; scale_mins <- NULL; scale_maxs <- NULL
+
   if (scaling == "standardization" && length(num_x) > 0) {
     means <- sapply(train[, num_x, drop = FALSE], mean, na.rm = TRUE)
     sds   <- sapply(train[, num_x, drop = FALSE], sd,   na.rm = TRUE)
     sds[sds == 0] <- 1
+    scale_means <- means; scale_sds <- sds
     train[, num_x] <- scale(train[, num_x, drop = FALSE], center = means, scale = sds)
     test[,  num_x] <- scale(test[,  num_x, drop = FALSE], center = means, scale = sds)
   } else if (scaling == "normalization" && length(num_x) > 0) {
     mins  <- sapply(train[, num_x, drop = FALSE], min, na.rm = TRUE)
     maxs  <- sapply(train[, num_x, drop = FALSE], max, na.rm = TRUE)
     rng   <- maxs - mins; rng[rng == 0] <- 1
+    scale_mins <- mins; scale_maxs <- maxs
     train[, num_x] <- sweep(sweep(train[, num_x, drop = FALSE], 2, mins, "-"), 2, rng, "/")
     test[,  num_x] <- sweep(sweep(test[,  num_x, drop = FALSE], 2, mins, "-"), 2, rng, "/")
   }
@@ -1050,7 +1020,10 @@ implement_logistic_classification <- function(spec) {
 
   return(invisible(list(model = model, cm = cm, acc = acc, classes = classes,
                         test = test, pred_test = pred_test, true_test = true_test,
-                        k = k, target = target, x_cols = x_cols)))
+                        k = k, target = target, x_cols = x_cols,
+                        train_raw = train_raw,
+                        scale_means = scale_means, scale_sds = scale_sds,
+                        scale_mins = scale_mins, scale_maxs = scale_maxs)))
 }
 
 plot_logistic_classification <- function(spec) {
@@ -1222,16 +1195,18 @@ implement_svm_classification <- function(spec) {
   x_cols    <- spec$x_columns
   train_pct <- if (!is.null(spec$train_percent)) spec$train_percent / 100 else 0.8
   scaling   <- if (!is.null(spec$scaling_method))  spec$scaling_method  else "none"
+  encoding  <- if (!is.null(spec$encoding_method)) spec$encoding_method else "onehot"
   balancing <- if (!is.null(spec$balancing_mode))  spec$balancing_mode  else "none"
 
   set.seed(123)
   n   <- nrow(data)
   idx <- sample(seq_len(n), size = floor(train_pct * n))
-  train <- data[idx,  , drop = FALSE]
+  train_raw <- data[idx,  , drop = FALSE]
+  train     <- train_raw
   test  <- data[-idx, , drop = FALSE]
 
   # enkodowanie kolumn kategorycznych
-  enc    <- safe_encode_x(train, test, x_cols = x_cols)
+  enc    <- safe_encode_x(train, test, x_cols = x_cols, encoding_method = encoding)
   train  <- enc$train
   test   <- enc$test
   x_cols <- enc$x_cols
@@ -1278,6 +1253,7 @@ implement_svm_classification <- function(spec) {
   model <- svm(formula, data = train,
                kernel = "radial", cost = 1,
                class.weights = class_weights_param,
+               scale = FALSE,        # skalowanie obsługiwane ręcznie wyżej
                probability = TRUE)
 
   pred_test <- predict(model, newdata = test)
@@ -1304,7 +1280,12 @@ implement_svm_classification <- function(spec) {
 
   return(invisible(list(model = model, cm = cm, acc = acc, classes = as.character(classes),
                         test = test, pred_test = pred_test, true_test = true_test,
-                        x_cols = x_cols, target = target)))
+                        x_cols = x_cols, target = target, train_raw = train_raw,
+                        scale_means = scale_means, scale_sds = scale_sds,
+                        scale_mins = scale_mins, scale_maxs = scale_maxs)))
+
+
+
 }
 
 plot_svm_classification <- function(spec) {
@@ -1429,16 +1410,18 @@ implement_rf_classification <- function(spec) {
   x_cols    <- spec$x_columns
   train_pct <- if (!is.null(spec$train_percent)) spec$train_percent / 100 else 0.8
   scaling   <- if (!is.null(spec$scaling_method))  spec$scaling_method  else "none"
+  encoding  <- if (!is.null(spec$encoding_method)) spec$encoding_method else "onehot"
   balancing <- if (!is.null(spec$balancing_mode))  spec$balancing_mode  else "none"
 
   set.seed(123)
   n   <- nrow(data)
   idx <- sample(seq_len(n), size = floor(train_pct * n))
-  train <- data[idx,  , drop = FALSE]
+  train_raw <- data[idx,  , drop = FALSE]
+  train     <- train_raw
   test  <- data[-idx, , drop = FALSE]
 
   # enkodowanie kolumn kategorycznych
-  enc    <- safe_encode_x(train, test, x_cols = x_cols)
+  enc    <- safe_encode_x(train, test, x_cols = x_cols, encoding_method = encoding)
   train  <- enc$train
   test   <- enc$test
   x_cols <- enc$x_cols
@@ -1448,17 +1431,21 @@ implement_rf_classification <- function(spec) {
         paste(enc$text_cols, collapse = ", "), "\n")
 
   num_x <- intersect(x_cols, names(train)[sapply(train, is.numeric)])
+  scale_means <- NULL; scale_sds <- NULL; scale_mins <- NULL; scale_maxs <- NULL
+
 
   if (scaling == "standardization" && length(num_x) > 0) {
     means <- sapply(train[, num_x, drop = FALSE], mean, na.rm = TRUE)
     sds   <- sapply(train[, num_x, drop = FALSE], sd,   na.rm = TRUE)
     sds[sds == 0] <- 1
+    scale_means <- means; scale_sds <- sds
     train[, num_x] <- scale(train[, num_x, drop = FALSE], center = means, scale = sds)
     test[,  num_x] <- scale(test[,  num_x, drop = FALSE], center = means, scale = sds)
   } else if (scaling == "normalization" && length(num_x) > 0) {
     mins  <- sapply(train[, num_x, drop = FALSE], min, na.rm = TRUE)
     maxs  <- sapply(train[, num_x, drop = FALSE], max, na.rm = TRUE)
     rng   <- maxs - mins; rng[rng == 0] <- 1
+    scale_mins <- mins; scale_maxs <- maxs
     train[, num_x] <- sweep(sweep(train[, num_x, drop = FALSE], 2, mins, "-"), 2, rng, "/")
     test[,  num_x] <- sweep(sweep(test[,  num_x, drop = FALSE], 2, mins, "-"), 2, rng, "/")
   }
@@ -1509,7 +1496,12 @@ implement_rf_classification <- function(spec) {
 
   return(invisible(list(model = model, cm = cm, acc = acc, classes = as.character(classes),
                         test = test, pred_test = pred_test, true_test = true_test,
-                        x_cols = x_cols, target = target)))
+                        x_cols = x_cols, target = target, train_raw = train_raw,
+                        scale_means = scale_means, scale_sds = scale_sds,
+                        scale_mins = scale_mins, scale_maxs = scale_maxs)))
+
+
+
 }
 
 plot_rf_classification <- function(spec) {
@@ -1796,8 +1788,10 @@ implement_dbscan_clustering <- function(spec) {
 
   df_scaled <- scale(df)
 
-  # automatyczny dobór eps metodą k-NN
-  minPts <- max(3, ncol(df) * 2)
+  # minPts z inputu (domyślnie 5)
+  minPts   <- if (!is.null(spec$extra_params[["minPts"]])) as.integer(spec$extra_params[["minPts"]]) else 5
+  minPts   <- max(2L, minPts)
+
   knn_dist <- sort(kNNdist(df_scaled, k = minPts - 1))
   # eps ~ 90. percentyl dystansu k-NN
   eps_auto <- quantile(knn_dist, 0.9)
@@ -1982,10 +1976,7 @@ plot_dbscan_clustering <- function(spec) {
     )
 }
 
-implement_meanshift_clustering <- function(spec) {
-  library(meanShiftR)
-  library(cluster)
-
+implement_hclust_clustering <- function(spec) {
   data <- spec$data
   cols <- spec$columns
 
@@ -1993,166 +1984,181 @@ implement_meanshift_clustering <- function(spec) {
     cat("Brak wybranych kolumn.\n"); return(invisible(NULL))
   }
 
-  df <- data[, cols, drop = FALSE]
-  df <- df[, sapply(df, is.numeric), drop = FALSE]
-  df <- na.omit(df)
-  df_scaled <- scale(df)
+  df   <- data[, cols, drop = FALSE]
+  df   <- df[, sapply(df, is.numeric), drop = FALSE]
+  df   <- na.omit(df)
+  cols <- names(df)
 
-  # bandwidth metodą Silvermana
-  n    <- nrow(df_scaled)
-  d    <- ncol(df_scaled)
-  bw   <- (4 / ((d + 2) * n))^(1 / (d + 4))
+  if (nrow(df) < 2) { cat("Za mało obserwacji.\n"); return(invisible(NULL)) }
 
-  result  <- meanShift(df_scaled, bandwidth = rep(bw, d))
-  labels  <- result$assignment
+  df_sc <- scale(df)
+  df_sc_df <- as.data.frame(df_sc)
+  colnames(df_sc_df) <- cols
 
-  n_clusters <- length(unique(labels))
+  method <- if (!is.null(spec$extra_params[["method"]])) spec$extra_params[["method"]] else "ward.D2"
+  k      <- if (!is.null(spec$extra_params[["k_hclust"]])) as.integer(spec$extra_params[["k_hclust"]]) else 3L
+  k      <- max(2L, min(k, nrow(df) - 1L))
+
+  hc     <- hclust(dist(df_sc), method = method)
+  labels <- cutree(hc, k = k)
+
   n_obs      <- nrow(df)
+  n_clusters <- length(unique(labels))
 
-  cat("====== OCENA MODELU MEAN-SHIFT ======\n")
-  cat("Bandwidth (Silverman):", round(bw, 4), "\n")
-  cat("Liczba wykrytych klastrów:", n_clusters, "\n")
+  cat("====== OCENA MODELU – HCLUST ======\n")
+  cat("Metoda łączenia:", method, "\n")
+  cat("Liczba klastrów:", k, "\n")
   cat("Liczba obserwacji:", n_obs, "\n\n")
   cat("====== LICZEBNOŚĆ KLASTRÓW ======\n")
   print(table(Klaster = labels))
 
-  if (n_clusters > 1) {
-    sil     <- silhouette(labels, dist(df_scaled))
+  if (n_clusters > 1 && n_obs <= 5000) {
+    sil     <- cluster::silhouette(labels, dist(df_sc))
     sil_avg <- mean(sil[, 3])
     cat("\nŚrednia szerokość sylwetki:", round(sil_avg, 4), "\n")
   }
 
-  return(invisible(list(labels = labels, df = df, df_scaled = df_scaled,
-                        bw = bw, n_clusters = n_clusters, cols = cols,
-                        result = result)))
+  return(invisible(list(
+    labels = labels, df = df, df_sc = df_sc_df,
+    hc = hc, k = k, method = method,
+    n_clusters = n_clusters, cols = cols
+  )))
 }
 
-plot_meanshift_clustering <- function(spec) {
+plot_hclust_clustering <- function(spec) {
   library(ggplot2)
   library(patchwork)
-  library(meanShiftR)
-  library(cluster)
 
   if (is.null(spec$data) || length(spec$columns) == 0) return()
-
-  res <- implement_meanshift_clustering(spec)
+  res <- implement_hclust_clustering(spec)
   if (is.null(res)) return()
 
-  labels     <- res$labels
-  df         <- res$df
-  df_scaled  <- res$df_scaled
-  cols       <- res$cols
-  bw         <- res$bw
-  n_clusters <- res$n_clusters
-  modes      <- res$result$value   # centroidy (mody) klastrów
-
+  labels      <- res$labels
+  df          <- res$df
+  df_sc       <- res$df_sc      # data.frame, colnames == cols
+  cols        <- res$cols
+  hc          <- res$hc
+  k           <- res$k
+  n_clusters  <- res$n_clusters
   cluster_fac <- factor(labels)
+  col1 <- cols[1]
+  col2 <- if (length(cols) >= 2) cols[2] else cols[1]
 
   base_theme <- theme_minimal(base_size = 13) +
-    theme(
-      plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
-      axis.title = element_text(size = 11),
-      axis.text  = element_text(size = 10)
-    )
+    theme(plot.title  = element_text(size = 14, face = "bold", hjust = 0.5),
+          axis.title  = element_text(size = 11),
+          axis.text   = element_text(size = 10))
 
-  col1 <- cols[1]; col2 <- if (length(cols) >= 2) cols[2] else cols[1]
+  # --- centroidy ---
+  kl_sorted   <- sort(unique(labels))
+  cen_sc_list <- lapply(kl_sorted, function(kl) colMeans(df_sc[labels == kl, cols, drop = FALSE]))
+  cen_sc_mat  <- do.call(rbind, cen_sc_list)
+  colnames(cen_sc_mat) <- cols
 
-  # scatter klastrów z modami
+  sd_v   <- apply(df[, cols, drop = FALSE], 2, sd); sd_v[sd_v == 0] <- 1
+  mean_v <- colMeans(df[, cols, drop = FALSE])
+  cen_orig        <- as.data.frame(t(apply(cen_sc_mat, 1, function(r) r * sd_v + mean_v)))
+  colnames(cen_orig) <- cols
+
+  # p1 – scatter
   scatter_df <- data.frame(X = df[[col1]], Y = df[[col2]], Klaster = cluster_fac)
-
-  # odskalowanie modów do oryginalnej skali
-  sd_df   <- apply(df, 2, sd);   sd_df[sd_df == 0]   <- 1
-  mean_df <- colMeans(df)
-  mode_uniq <- unique(modes)     # każdy wiersz to centroid klastru
-  if (ncol(mode_uniq) == ncol(df_scaled)) {
-    modes_orig <- sweep(sweep(mode_uniq, 2, sd_df, "*"), 2, mean_df, "+")
-    modes_df   <- data.frame(X = modes_orig[, match(col1, cols)],
-                              Y = modes_orig[, match(col2, cols)])
-  } else {
-    modes_df <- NULL
-  }
-
+  cen_df     <- data.frame(X = cen_orig[[col1]], Y = cen_orig[[col2]])
   p1 <- ggplot(scatter_df, aes(x = X, y = Y, color = Klaster)) +
     geom_point(size = 2.5, alpha = 0.7) +
-    { if (!is.null(modes_df))
-        geom_point(data = modes_df, aes(x = X, y = Y), inherit.aes = FALSE,
-                   color = "black", size = 5, shape = 8)
-    } +
-    labs(title = paste0("Klastry Mean-Shift: ", col1, " vs ", col2),
-         x = col1, y = col2, color = "Klaster") +
+    geom_point(data = cen_df, aes(x = X, y = Y), inherit.aes = FALSE,
+               color = "black", size = 5, shape = 8) +
+    labs(title = paste0(col1, " vs ", col2), x = col1, y = col2, color = "Klaster") +
     base_theme + theme(legend.position = "bottom")
 
-  # gęstości KDE per klaster
-  dens_df <- data.frame(X = df[[col1]], Klaster = cluster_fac)
-  p2 <- ggplot(dens_df, aes(x = X, fill = Klaster, color = Klaster)) +
-    geom_density(alpha = 0.35, linewidth = 0.8) +
-    labs(title = paste0("Gęstości KDE – ", col1),
-         x = col1, y = "Gestosc", fill = "Klaster", color = "Klaster") +
-    base_theme + theme(legend.position = "bottom")
+  # p2 – dendrogram (base R, konwersja na ggplot przez ggdendro segmenty ręcznie)
+  n_show  <- min(nrow(df), 60)
+  hc_show <- if (nrow(df) > n_show) {
+    set.seed(42)
+    idx <- sample(seq_len(nrow(df)), n_show)
+    hclust(dist(df_sc[idx, cols, drop = FALSE]), method = res$method)
+  } else hc
 
-  # liczebność klastrów
+  # wyciągnij segmenty z merge/height
+  build_segs <- function(hc_obj) {
+    m <- hc_obj$merge; h <- hc_obj$height; n <- length(hc_obj$order)
+    xpos <- numeric(n); xpos[hc_obj$order] <- seq_len(n)
+    nx   <- numeric(nrow(m) + n); nx[seq_len(n)] <- xpos
+    segs <- vector("list", 3 * nrow(m))
+    si   <- 1L
+    for (i in seq_len(nrow(m))) {
+      li <- m[i,1]; ri <- m[i,2]
+      lx <- if (li<0) xpos[-li] else nx[n+li]
+      rx <- if (ri<0) xpos[-ri] else nx[n+ri]
+      ly <- if (li<0) 0         else h[li]
+      ry <- if (ri<0) 0         else h[ri]
+      cx <- (lx+rx)/2; nx[n+i] <- cx
+      segs[[si]]   <- c(lx,ly,lx,h[i]);   si <- si+1L
+      segs[[si]]   <- c(rx,ry,rx,h[i]);   si <- si+1L
+      segs[[si]]   <- c(lx,h[i],rx,h[i]); si <- si+1L
+    }
+    s <- as.data.frame(do.call(rbind, segs[seq_len(si-1)]))
+    names(s) <- c("x","y","xend","yend")
+    cut_h <- if (k>=2 && k<=nrow(m)) { sh <- sort(h,decreasing=TRUE); (sh[k-1]+sh[k])/2 } else max(h)*0.5
+    list(segs=s, cut_h=cut_h)
+  }
+  dend <- build_segs(hc_show)
+  p2 <- ggplot(dend$segs, aes(x=x, y=y, xend=xend, yend=yend)) +
+    geom_segment(color="grey40") +
+    geom_hline(yintercept=dend$cut_h, linetype="dashed", color="red", linewidth=0.7) +
+    labs(title="Dendrogram (próbka)", x="", y="Wysokość") +
+    base_theme + theme(axis.text.x=element_blank(), axis.ticks.x=element_blank())
+
+  # p3 – liczebność
   cnt_df <- as.data.frame(table(Klaster = cluster_fac))
-  p3 <- ggplot(cnt_df, aes(x = Klaster, y = Freq, fill = Klaster)) +
-    geom_col(alpha = 0.85) +
-    geom_text(aes(label = Freq), vjust = -0.4, size = 4.5) +
-    labs(title = "Liczebność klastrów", x = "Klaster", y = "Liczba obserwacji") +
-    base_theme + theme(legend.position = "none")
+  p3 <- ggplot(cnt_df, aes(x=Klaster, y=Freq, fill=Klaster)) +
+    geom_col(alpha=0.85) +
+    geom_text(aes(label=Freq), vjust=-0.4, size=4.5) +
+    labs(title="Liczebność klastrów", x="Klaster", y="Liczba obserwacji") +
+    base_theme + theme(legend.position="none")
 
-  # wykres sylwetki
-  if (n_clusters > 1) {
-    sil <- silhouette(labels, dist(df_scaled))
-    sil_avg <- mean(sil[, 3])
-    sil_df <- data.frame(
-      obs     = seq_len(nrow(sil)),
-      width   = sil[, 3],
-      cluster = factor(sil[, 1])
-    )
-    sil_df <- sil_df[order(sil_df$cluster, -sil_df$width), ]
-    sil_df$obs <- seq_len(nrow(sil_df))
-    p4 <- ggplot(sil_df, aes(x = obs, y = width, fill = cluster)) +
-      geom_col(width = 1, alpha = 0.8) +
-      geom_hline(yintercept = sil_avg, linetype = "dashed", color = "red") +
-      annotate("text", x = nrow(sil_df) * 0.8, y = sil_avg + 0.05,
-               label = paste0("Avg = ", round(sil_avg, 3)), color = "red", size = 4) +
-      labs(title = "Wykres sylwetki", x = "Obserwacja",
-           y = "Szerokosc sylwetki", fill = "Klaster") +
-      base_theme + theme(legend.position = "bottom")
+  # p4 – sylwetka
+  if (n_clusters > 1 && nrow(df) <= 5000) {
+    sil     <- cluster::silhouette(labels, dist(as.matrix(df_sc[, cols])))
+    sil_avg <- mean(sil[,3])
+    sil_df  <- data.frame(obs=seq_len(nrow(sil)), width=sil[,3], cluster=factor(sil[,1]))
+    sil_df  <- sil_df[order(sil_df$cluster, -sil_df$width), ]; sil_df$obs <- seq_len(nrow(sil_df))
+    p4 <- ggplot(sil_df, aes(x=obs, y=width, fill=cluster)) +
+      geom_col(width=1, alpha=0.8) +
+      geom_hline(yintercept=sil_avg, linetype="dashed", color="red") +
+      annotate("text", x=nrow(sil_df)*0.75, y=sil_avg+0.05,
+               label=paste0("Avg=",round(sil_avg,3)), color="red", size=4) +
+      labs(title="Wykres sylwetki", x="Obserwacja", y="Szerokość", fill="Klaster") +
+      base_theme + theme(legend.position="bottom")
   } else {
-    p4 <- ggplot() +
-      annotate("text", x = 1, y = 1, label = "Jeden klaster –\nbrak sylwetki", size = 5) +
+    p4 <- ggplot() + annotate("text",x=1,y=1,label="Sylwetka niedostępna",size=5) +
       theme_void() + ggtitle("Wykres sylwetki")
   }
 
-  # odległości punktów od własnego modu
-  dists <- sapply(seq_len(nrow(df_scaled)), function(i) {
-    sqrt(sum((df_scaled[i, ] - modes[i, ])^2))
-  })
-  dist_df <- data.frame(Odleglosc = dists, Klaster = cluster_fac)
-  p5 <- ggplot(dist_df, aes(x = Odleglosc, fill = Klaster)) +
-    geom_histogram(bins = 25, alpha = 0.7, position = "identity", color = "white") +
-    labs(title = "Odległości do modu klastra",
-         x = "Odleglosc euklidesowa (skalowana)", y = "Liczba punktów", fill = "Klaster") +
-    base_theme + theme(legend.position = "bottom")
+  # p5 – heatmapa centroidów (skalowanych)
+  cen_long <- do.call(rbind, lapply(seq_along(cols), function(ci) {
+    data.frame(Klaster  = factor(kl_sorted),
+               Zmienna  = cols[ci],
+               Wartosc  = cen_sc_mat[, ci])
+  }))
+  p5 <- ggplot(cen_long, aes(x=Zmienna, y=Klaster, fill=Wartosc)) +
+    geom_tile(color="white") +
+    scale_fill_gradient2(low="#6D9EC1", mid="white", high="#E46726", midpoint=0) +
+    labs(title="Centroidy (skalowane)", x="Zmienna", y="Klaster") +
+    base_theme + theme(axis.text.x=element_text(angle=35, hjust=1))
 
-  # boxploty cech per klaster
-  box_data <- data.frame(df, Klaster = cluster_fac)
-  p6 <- ggplot(box_data, aes(x = Klaster, y = .data[[col1]], fill = Klaster)) +
-    geom_boxplot(alpha = 0.75, outlier.alpha = 0.4) +
-    labs(title = paste0("Rozkład ", col1, " per klaster"),
-         x = "Klaster", y = col1) +
-    base_theme + theme(legend.position = "none")
+  # p6 – boxplot
+  box_df <- data.frame(df[, cols, drop=FALSE], Klaster=cluster_fac)
+  p6 <- ggplot(box_df, aes(x=Klaster, y=.data[[col1]], fill=Klaster)) +
+    geom_boxplot(alpha=0.75, outlier.alpha=0.4) +
+    labs(title=paste0("Rozkład ", col1), x="Klaster", y=col1) +
+    base_theme + theme(legend.position="none")
 
-  (p1 | p2 | p3) /
-    (p4 | p5 | p6) +
+  (p1 | p2 | p3) / (p4 | p5 | p6) +
     plot_annotation(
-      title = "Diagnostyka – Mean-Shift",
-      theme = theme(plot.title = element_text(size = 18, face = "bold", hjust = 0.5))
+      title = "Diagnostyka – klasteryzacja hierarchiczna (hclust)",
+      theme = theme(plot.title = element_text(size=18, face="bold", hjust=0.5))
     )
 }
-
-
-# --- print_model_spec: wypisuje pola spec do konsoli ---
-
 
 print_model_spec <- function(spec) {
   cat("========== KONFIGURACJA MODELU ==========\n")

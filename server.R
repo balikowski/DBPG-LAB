@@ -73,12 +73,12 @@ server <- function(input, output, session) {
                          "dbscan_dataset", "dbscan_columns",
                          "show_dbscan_config", "dbscan_summary",
                          "DBSCAN",
-                         c("Liczba klastrów" = "dbscan_clusters"))
+                         c("minPts" = "dbscan_minpts"))
   show_clustering_config(session, input, output, get_dataset_by_name,
                          "meanshift_dataset", "meanshift_columns",
                          "show_meanshift_config", "meanshift_summary",
-                         "Mean-shift",
-                         c("Liczba klastrów" = "meanshift_clusters"))
+                         "Hierarchiczna (hclust)",
+                         c("k_hclust" = "agnes_k", "method" = "agnes_method"))
 
   # ── Import pliku CSV ─────────────────────────────────────────────────────
   observeEvent(input$load_file, {

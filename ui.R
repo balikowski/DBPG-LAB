@@ -111,18 +111,23 @@ ui <- navbarPage(
         clustering_controls(
           "dbscan_dataset", "dbscan_columns",
           "show_dbscan_config", "dbscan_summary",
-          extra_ui = sliderInput("dbscan_clusters", "Liczba klastrów:",
-                                 min = 2, max = 10, value = 3, step = 1)
+          extra_ui = sliderInput("dbscan_minpts", "Minimalna liczba sąsiadów (minPts):",
+                                 min = 2, max = 20, value = 5, step = 1)
         )
       ),
       tabPanel(
-        "Mean-shift",
-        h2("Mean-shift"),
+        "Hierarchiczna (hclust)",
+        h2("Klasteryzacja hierarchiczna"),
         clustering_controls(
           "meanshift_dataset", "meanshift_columns",
           "show_meanshift_config", "meanshift_summary",
-          extra_ui = sliderInput("meanshift_clusters", "Liczba klastrów:",
-                                 min = 2, max = 10, value = 3, step = 1)
+          extra_ui = tagList(
+            sliderInput("agnes_k", "Liczba klastrów:",
+                        min = 2, max = 10, value = 3, step = 1),
+            selectInput("agnes_method", "Metoda łączenia:",
+                        choices = c("ward.D2", "complete", "average", "single"),
+                        selected = "ward.D2")
+          )
         )
       )
     )

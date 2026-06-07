@@ -279,14 +279,26 @@ predict_linear <- function(spec, new_obs) {
 }
 
 predict_rf_reg <- function(spec, new_obs) {
-  model      <- implement_rf_regression(spec)
-  prediction <- predict(model, newdata = new_obs)
-  return(as.numeric(prediction))
+  res <- implement_rf_regression(spec)
+  as.numeric(predict(res$model, newdata = new_obs))
 }
 
 predict_svr_reg <- function(spec, new_obs) {
-  # placeholder – zwraca medianę Y (stub, tak jak implement_svr_regression)
-  median(spec$data[[spec$y_column]], na.rm = TRUE)
+  res <- implement_svr_regression(spec)
+
+  # zastosuj te same parametry skalowania co przy trenowaniu
+  num_cols <- res$num_cols
+  num_in_x <- intersect(names(new_obs), num_cols)
+  if (length(num_in_x) > 0) {
+    new_obs[, num_in_x] <- sweep(
+      sweep(new_obs[, num_in_x, drop = FALSE], 2,
+            res$scale_params$mean[num_in_x], "-"),
+      2, res$scale_params$sd[num_in_x], "/")
+  }
+
+  pred_scaled <- as.numeric(predict(res$model, newdata = new_obs))
+  pred_scaled * res$scale_params$sd[spec$y_column] +
+    res$scale_params$mean[spec$y_column]
 }
 
 
@@ -404,94 +416,46 @@ setup_classification_prediction <- function(session, input, output,
 # === Konkretne funkcje predykcji – klasyfikacja ===
 
 predict_logistic <- function(spec, new_obs) {
-  library(nnet)
-  data      <- spec$data
-  target    <- spec$target_column
-  x_cols    <- spec$x_columns
-  train_pct <- if (!is.null(spec$train_percent)) spec$train_percent / 100 else 0.8
+  res <- implement_logistic_classification(spec)
 
-  set.seed(123)
-  idx   <- sample(seq_len(nrow(data)), size = floor(train_pct * nrow(data)))
-  train <- data[idx, , drop = FALSE]
-
-  enc     <- safe_encode_x(train, new_obs = new_obs, x_cols = x_cols)
-  train   <- enc$train
-  new_obs <- enc$new_obs
+  enc     <- safe_encode_x(res$train_raw, new_obs = new_obs, x_cols = spec$x_columns)
+  new_enc <- enc$new_obs
   x_cols  <- enc$x_cols
 
-  classes <- sort(unique(train[[target]]))
-  k       <- length(classes)
-  train[[target]] <- factor(train[[target]], levels = classes)
-
-  formula <- as.formula(paste(
-    paste0("factor(`", target, "`)"),
-    "~",
-    paste(paste0("`", x_cols, "`"), collapse = " + ")
-  ))
-
-  if (k == 2) {
-    model    <- glm(formula, data = train, family = binomial())
-    prob     <- predict(model, newdata = new_obs, type = "response")
-    pred_cls <- ifelse(prob >= 0.5, classes[2], classes[1])
-  } else {
-    model    <- multinom(formula, data = train, trace = FALSE)
-    pred_cls <- as.character(predict(model, newdata = new_obs))
-  }
-  pred_cls
+  pred <- predict(res$model, newdata = new_enc)
+  as.character(pred)
 }
 
 predict_svm_class <- function(spec, new_obs) {
-  library(e1071)
-  data      <- spec$data
-  target    <- spec$target_column
-  x_cols    <- spec$x_columns
-  train_pct <- if (!is.null(spec$train_percent)) spec$train_percent / 100 else 0.8
+  res <- implement_svm_classification(spec)
 
-  set.seed(123)
-  idx   <- sample(seq_len(nrow(data)), size = floor(train_pct * nrow(data)))
-  train <- data[idx, , drop = FALSE]
-
-  enc     <- safe_encode_x(train, new_obs = new_obs, x_cols = x_cols)
-  train   <- enc$train
-  new_obs <- enc$new_obs
+  enc     <- safe_encode_x(res$train_raw, new_obs = new_obs, x_cols = spec$x_columns)
+  new_enc <- enc$new_obs
   x_cols  <- enc$x_cols
 
-  classes <- sort(unique(train[[target]]))
-  train[[target]] <- factor(train[[target]], levels = classes)
+  # skalowanie identyczne jak przy treningu
+  num_x <- intersect(x_cols, names(new_enc)[sapply(new_enc, is.numeric)])
+  if (!is.null(res$scale_means) && length(num_x) > 0) {
+    new_enc[, num_x] <- scale(new_enc[, num_x, drop = FALSE],
+                              center = res$scale_means[num_x],
+                              scale  = res$scale_sds[num_x])
+  } else if (!is.null(res$scale_mins) && length(num_x) > 0) {
+    rng <- res$scale_maxs[num_x] - res$scale_mins[num_x]
+    rng[rng == 0] <- 1
+    new_enc[, num_x] <- sweep(
+      sweep(new_enc[, num_x, drop = FALSE], 2, res$scale_mins[num_x], "-"),
+      2, rng, "/")
+  }
 
-  formula <- as.formula(paste(
-    paste0("factor(`", target, "`)"),
-    "~",
-    paste(paste0("`", x_cols, "`"), collapse = " + ")
-  ))
-  model <- svm(formula, data = train, kernel = "radial", cost = 1)
-  as.character(predict(model, newdata = new_obs))
+  as.character(predict(res$model, newdata = new_enc))
 }
 
 predict_rf_class <- function(spec, new_obs) {
-  library(randomForest)
-  data      <- spec$data
-  target    <- spec$target_column
-  x_cols    <- spec$x_columns
-  train_pct <- if (!is.null(spec$train_percent)) spec$train_percent / 100 else 0.8
+  res <- implement_rf_classification(spec)
 
-  set.seed(123)
-  idx   <- sample(seq_len(nrow(data)), size = floor(train_pct * nrow(data)))
-  train <- data[idx, , drop = FALSE]
-
-  enc     <- safe_encode_x(train, new_obs = new_obs, x_cols = x_cols)
-  train   <- enc$train
-  new_obs <- enc$new_obs
+  enc     <- safe_encode_x(res$train_raw, new_obs = new_obs, x_cols = spec$x_columns)
+  new_enc <- enc$new_obs
   x_cols  <- enc$x_cols
 
-  classes <- sort(unique(train[[target]]))
-  train[[target]] <- factor(train[[target]], levels = classes)
-
-  formula <- as.formula(paste(
-    paste0("factor(`", target, "`)"),
-    "~",
-    paste(paste0("`", x_cols, "`"), collapse = " + ")
-  ))
-  model <- randomForest(formula, data = train, ntree = 500)
-  as.character(predict(model, newdata = new_obs))
+  as.character(predict(res$model, newdata = new_enc))
 }
